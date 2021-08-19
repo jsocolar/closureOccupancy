@@ -1,0 +1,84 @@
+---
+title: 'Getting closure on occupancy models'
+author: "Jacob Socolar"
+date: "8/14/2021"
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file,
+ encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This page provides a gentle introduction to occupancy models with particular focus on the so-called *closure assumption* and its implications for model interpretation.
+
+Biological surveys yield data on the detection and nondetection of species at locations. Unfortunately, these data conflate two processes with very different biological interpretations. The *occupancy process* governs whether or not a species is present at (*occupies*) a location. The *detection process* comes into play only where the species is present, and governs whether the species is then detected by the observer. 
+
+Happily, these two processes leave telltale fingerprints on the data when locations are surveyed repeatedly over a period during which the unobserved true occupancy state does not change. In the business, this assumption of unchanging occupancy status is termed *closure*, and closure induces a particular dependency structure in the repeat-visit data that the detection process alone cannot reproduce. For an intuitive idea of how this works, consider a system where occupancy is low but detection probabilities are high. With just one visit per site, we cannot know whether we are in a high-detection low-occupancy regime, or a low-detection high-occupancy regime. But with multiple visits per site, the high-detection low-occupancy regime tends to produce either no detections at a sampling unit (because it is unoccupied) or multiple detections (because detection probabilities are high). The low-detection high-occupancy regime, by contrast, tends to yield many sites with just one detection, and relatively few sites with multiple detections.
+
+Both occupancy and detection are binary states, and we can think of the occupancy model as a pair of logistic regressions, one predicting occupancy probabilities and the other predicting detection probabilities. Combining these probabilities using a likelihood term that captures the closure assumption yields the occupancy model, which is now a core piece of the statistical toolkit for ecologists and wildlife biologists.
+
+## A simple occupancy model
+For those who prefer to learn by example, let's simulate data for a simple occupancy model, and then fit the model using R package `flocker`, [available here](https://github.com/jsocolar/flocker). We'll simulate the data using code that makes very explicit exactly what is happening. Under the hood, the `flocker` model just recapitulates this exact data-generating process.
+```{r simulate}
+# remotes::install_github("jsocolar/flocker")
+library(flocker)
+set.seed(123)
+
+# Study-site characteristics
+n_pt <- 200 # 200 points, which are the closure-unit in this single-species model
+n_visit <- 4 # 4 repeat visits to each point
+pt_cov <- rnorm(n_pt) # a covariate that varies by point
+visit_cov <- matrix(rnorm(n_pt * n_visit), ncol = n_visit) # a covariate that
+                                                           # varies by visit
+# Model Parameters
+alpha_occ <- 0 # logit-scale intercept for occupancy
+beta_occ <- 1 # coefficient for influence of pt_cov on occ
+alpha_det <- -1 # logit-scale intercept for detection
+beta_det_1 <- -1 # coefficient for influence of pt_cov on det
+beta_det_2 <- .5 # coefficient for influence of visit_cov on det
+
+# Linear predictors
+mu_occ <- alpha_occ + beta_occ * pt_cov
+mu_det <- alpha_det + cbind(replicate(4, beta_det_1 * pt_cov)) +
+                beta_det_2 * visit_cov
+
+# Simulation
+Z <- rbinom(n_pt, 1, boot::inv.logit(mu_occ)) # True occupancy state
+obs <- matrix(rbinom(n_pt * n_visit, 1, boot::inv.logit(as.vector(mu_det))), ncol = 4) *
+            cbind(replicate(4, Z)) # Observed data
+
+# Prepare data for flocker
+fd <- make_flocker_data(obs = obs, constant_covs = data.frame(pt_cov = pt_cov),
+                  visit_covs = list(visit_cov = visit_cov))
+flocker_model <- flock(f_occ = ~ pt_cov,
+                       f_det = ~ pt_cov + visit_cov,
+                       flocker_data = fd,
+                       backend = "cmdstanr",
+                       refresh = 0)
+summary(flocker_model)
+```
+## Two key assumptions
+Both in our simulation and to recover our simulation parameters, we made a few key assumptions. Many of them are fairly standard to logistic regression (for example, we assume that covariate relationships are approximately logit-linear). We also assume that there are no false detections in our data. But two assumptions get all the attention. First, we assume closure. And second, we assume that there is no unmodeled heterogeneity in occupancy or detection probabilities. Once we inject some biological details into our sampling process, we will see that the first and second assumptions are closely intertwined.
+
+First, though, let's build some intuition about why it is so important that there be no (or minimal) unmodeled heterogeneity in detection. The easiest scenario to build understanding is one where occupancy is uniformly high. Now if some points have high detection rates, and others have low detection rates, many points will yield detections on most visits (the high-detection points). But there will also be many points that yield *no* detections (the low-detection points). This pattern of some points with many detections and some points with no detections looks like the telltale fingerprint of variation in occupancy under uniformly high detection. Granted, there will probably be an excess of points with just one detection compared to what we would expect in a pure high-detection scenario. Thus, if we supply the model with covariates to distinguish between the high-detection and low-detection points, the model should have no trouble understanding that this is a scenario of heterogeneous detection, not a scenario of variation in occupancy.  But if we fail to supply adequate covariates (if the heterogeneity in detection is *unmodeled*), the occupancy model may well decide that the most probably parameter values are those that lead to uniformly high detection probabilities and moderate occupancy probabilities. 
+
+## What is occupancy anyway?
+Consider a point-count station inside the home range of a bird. Sometimes the bird is in the vicinity of the point; other times the bird is not. Is the point still "occupied" when the bird isn't in the vicinity? 
+
+In the literature, we find all kinds of alternative takes on this question. In camera-trap studies, for example, it's obvious that occupancy is interpreted to mean something less specific than being in the field-of-view of the camera. In this context, an animal's movement is conceptualized as part of the *detection* process: Occupancy means having a home range that covers the camera trap; detection means walking in front of the trap and triggering the camera. On the other hand, some avian point-count studies conduct their repeated visits on very short timescales (e.g. minutes) in order to minimize "closure violations" due to the movement of individuals onto or off of the point-count radius. Yet point-count studies conduct visits spaced by days or even weeks. 
+
+For a motile organism in an occupancy study, it is conceptually useful to partition the observation process into three components. One is whether an individual holds a home-range overlapping the site. This is clearly part of the occupancy process. Another is whether an individual in the vicinity of the site gets detected. This is clearly part of the detection process. And the final, ambiguous component is whether an individual whose home-range overlaps the site is physically present in the vicinity of the site during the survey. The species movements can be thought of as part of the detection process, or they can be thought of as part of the occupancy process. How do we decide?
+
+## Getting closure
+Note that the question of what counts as occupancy has big ramifications for what the closure assumption means and whether or not it is violated. If movements on and off the point are part of the occupancy process, then we had better conduct repeat visits on a timescale shorter than the typical timescale over which an individual moves around its territory. Otherwise, we'll violate closure. On the other hand, if movements on and off the point are part of the detection process, then we had better conduct repeat visits on a timescale longer than the timescale over which a species moves around its territory. If we conduct visits with insufficient spacing, then detection probabilities on subsequent visits will no longer be independent, leading to unmodeled heterogeneity in detection probabilities. This is why I wrote that the closure assumption and the no-unmodeled-heterogeneity assumption are intertwined.
+
+Ultimately, what's really crucial in the occupancy model is a *separation of timescales* between occupancy and detection. Occupancy must be extremely strongly autocorrelated over the timescale of the study--so autocorrelated that it can be assumed constant through the duration of the sampling. Detection must be autocorrelated only over timescales that are shorter than the intervals between repeat visits lest the autocorrelation induce unmodeled heterogeneity in detection probabilities.  This puts the researcher on something of a tightrope.  Space sampling events too much, and risk running afoul of closure.  Space events too little, and risk introducing unmodeled heterogeneity in detection. 
+
+So what is occupancy? It doesn't matter what you, the researcher, think occupancy "should" mean. What matters is that the observation process can be broken down into two components, one of which varies slowly and the other of which varies quickly (spatial analogues work as well if one process varies gradually with space and the other varies over short length-scales), and that the timescale (or lengthscale) of the sampling sits *between* the two. From the model's perspective, "occupancy" is whatever is varying slowly, "detection" is whatever is varying quickly, "closure" is the assumption that occupancy varies on a timescale much longer than the sampling, and "no unmodeled heterogeneity" implies (among other things) that detection varies on timescales much shorter than the sampling intervals.
+
+It's worth noting that there's no guarantee in general that such a separation of timescales exists. It could be that the sampling interval was chosen in such a way that it fails to sit in between the fast and slow variability in nature. It's also possible that there are no clearly separated fast and slow timescales in nature, and anything that we might think to call "detection" is autocorrelated out to timescales that overlap with anything that we might think to call "occupancy."  This issue is why, for example, we don't typically apply occupancy models to migratory birds during stopover.
